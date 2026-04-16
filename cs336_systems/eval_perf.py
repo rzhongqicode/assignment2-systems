@@ -16,6 +16,7 @@ parser.add_argument("-n", "--num_steps", type=int, default=20, help="Number of m
 parser.add_argument("--context_length", type=int, default=256, help="Sequence length")
 parser.add_argument("--batch_size", type=int, default=4, help="Batch size")
 parser.add_argument("--bf16", action="store_true", help="Use BF16 mixed precision")
+parser.add_argument("--profile_memory", action="store_true", help="Record and dump memory history snapshot")
 args = parser.parse_args()
 
 ifBackward = args.backward
@@ -33,6 +34,7 @@ num_heads = 12
 rope_theta = 10000
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
+
 # init model and optimizer
 model = BasicsTransformerLM(vocab_size, context_length, d_model, num_layers, num_heads, d_ff, rope_theta)
 model.to(device)
@@ -63,6 +65,7 @@ for _ in range(warmup_steps):
 
     if ifBackward:
         loss.backward()
+        optimizer.step()      
         optimizer.zero_grad()
         
     if device == "cuda":
@@ -75,11 +78,17 @@ print(f"Benchmarking for {num_steps} steps...")
 
 fwd_time_total = 0.0
 bwd_time_total = 0.0
+opt_time_total = 0.0  # optimizer step time
+
+#  tuen on Memory Profile
+if args.profile_memory and device == "cuda":
+    print("📸 Started recording PyTorch memory history...")
+    torch.cuda.memory._record_memory_history(max_entries=1000000)
 
 start_time = timeit.default_timer()
 
 for _ in range(num_steps):
-    # 1.  Forward 
+    # 1. Forward 
     fwd_start = timeit.default_timer()
     with ctx:
         logits = model(input_data)
@@ -91,17 +100,29 @@ for _ in range(num_steps):
         torch.cuda.synchronize() 
     fwd_time_total += (timeit.default_timer() - fwd_start)
 
-    # 2.  Backward 
     if ifBackward:
+        # 2. Backward
         bwd_start = timeit.default_timer()
         loss.backward()
-        optimizer.zero_grad()
-        
         if device == "cuda":
             torch.cuda.synchronize() 
         bwd_time_total += (timeit.default_timer() - bwd_start)
 
+        # 3. Optimizer Step
+        opt_start = timeit.default_timer()
+        optimizer.step()
+        optimizer.zero_grad()
+        if device == "cuda":
+            torch.cuda.synchronize()
+        opt_time_total += (timeit.default_timer() - opt_start)
+
 end_time = timeit.default_timer()
+
+# save and close Memory Profile
+if args.profile_memory and device == "cuda":
+    torch.cuda.memory._dump_snapshot("memory_snapshot.pickle")
+    torch.cuda.memory._record_memory_history(enabled=None)
+    print("💾 Memory snapshot saved to 'memory_snapshot.pickle'")
 
 # ==========================================
 # Calculate Metrics
@@ -113,6 +134,7 @@ throughput = tokens_per_iter / avg_time_per_iter
 
 avg_fwd_time = fwd_time_total / num_steps
 avg_bwd_time = (bwd_time_total / num_steps) if ifBackward else 0.0
+avg_opt_time = (opt_time_total / num_steps) if ifBackward else 0.0
 
 print("\n" + "=" * 45)
 print("📊 Benchmark Results")
@@ -124,6 +146,7 @@ print("-" * 45)
 print(f"Avg Fwd Time : {avg_fwd_time:.5f} seconds/step")
 if ifBackward:
     print(f"Avg Bwd Time : {avg_bwd_time:.5f} seconds/step")
+    print(f"Avg Opt Time : {avg_opt_time:.5f} seconds/step") 
 print(f"Total Time/St: {avg_time_per_iter:.5f} seconds/step")
 print("-" * 45)
 print(f"Throughput   : {throughput:.2f} tokens/second")
