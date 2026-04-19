@@ -108,6 +108,7 @@ def flash_fwd_kernel(
     D: tl.constexpr,
     Q_TILE_SIZE: tl.constexpr,
     K_TILE_SIZE: tl.constexpr,
+    is_causal: tl.constexpr
 ):
     # -----------------------------------------------------------
     # 1. Program Identifiers
@@ -172,6 +173,7 @@ def flash_fwd_kernel(
     # -----------------------------------------------------------
     # Q remains stationary for this specific thread block throughout the loop.
     Q_tile = tl.load(Q_block_ptr, boundary_check=(0,), padding_option="zero")  # Shape: [Q_TILE_SIZE, D]
+    Q_offset = query_tile_index * Q_TILE_SIZE + tl.arange(0, Q_TILE_SIZE)
 
     # Initialize running maximum (m), exponential sum (l), and output accumulator (O).
     # ALL accumulators MUST be float32 to prevent underflow/overflow during summation.
@@ -182,15 +184,21 @@ def flash_fwd_kernel(
     # -----------------------------------------------------------
     # 4. Inner Loop over K and V Tiles
     # -----------------------------------------------------------
-    for _ in range(tl.cdiv(N_KEYS, K_TILE_SIZE)):
+    for k_tile_index in range(tl.cdiv(N_KEYS, K_TILE_SIZE)):
         # Load current K and V tiles
         K_tile = tl.load(K_block_ptr, boundary_check=(0,), padding_option="zero")  # [K_TILE_SIZE, D]
-        V_tile = tl.load(V_block_ptr, boundary_check=(0,), padding_option="zero")  # [K_TILE_SIZE, D]
+        V_tile = tl.load(V_block_ptr, boundary_check=(0,), padding_option="zero")  # [K_TILE_SIZE, D]   
+        K_offset = k_tile_index * K_TILE_SIZE + tl.arange(0, K_TILE_SIZE)
 
         # Compute pre-softmax attention scores: S = (Q @ K^T) * scale
         K_tile_T = tl.trans(K_tile)
         S = tl.dot(Q_tile, K_tile_T)
         S = S * scale
+
+        # if is_causal
+        if is_causal:
+            mask = Q_offset[:, None] >= K_offset[None, :]
+            S = tl.where(mask, S, -1e6)
 
         # FlashAttention Online Softmax Logic
         max_s = tl.max(S, axis=1)
@@ -250,6 +258,7 @@ class FlashAttention2Triton(torch.autograd.Function):
         ctx.D = dim
         ctx.Q_TILE_SIZE = 16
         ctx.K_TILE_SIZE = 16
+        ctx.is_causal = is_causal
         flash_fwd_kernel[(cdiv(N_q, ctx.Q_TILE_SIZE), batch_size)](
             Q,
             K,
@@ -275,7 +284,8 @@ class FlashAttention2Triton(torch.autograd.Function):
             scale,
             D=ctx.D,
             Q_TILE_SIZE=ctx.Q_TILE_SIZE,
-            K_TILE_SIZE=ctx.K_TILE_SZIE,
+            K_TILE_SIZE=ctx.K_TILE_SIZE,
+            is_causal=ctx.is_causal
         )
         ctx.save_for_backward(Q, K, V, O, L)
         return O
