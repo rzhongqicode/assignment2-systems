@@ -15,6 +15,7 @@ class FlashAttention2Pytorch(torch.autograd.Function):
 
         Q_TILE_SIZE = 16
         K_TILE_SIZE = 16
+        ctx.is_causal = is_causal
 
         # 2. Initialize tensors with the Batch dimension included
         O = torch.zeros((B, N_q, dim), device=Q.device)
@@ -43,6 +44,9 @@ class FlashAttention2Pytorch(torch.autograd.Function):
 
                 # 4. Compute local attention scores (support Batch dim using 'b')
                 S_ij = einsum(Q_tile, K_tile, "b q d, b k d -> b q k") / math.sqrt(dim)
+                if is_causal:
+                    mask = torch.ones(size=S.shape[-2:], dtype=torch.bool, device=S.device).tril()
+                    S = torch.where(mask, S, -1e6)
                 max_s_ij = torch.max(S_ij, dim=-1).values  # [B, Q_TILE]
 
                 old_m_i = m_i.clone()
@@ -73,6 +77,10 @@ class FlashAttention2Pytorch(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_out):
+        Q, K, V, O, L = ctx.saved_tensors
+        is_causal = ctx.is_causal
+        dQ, dK, dV = fa2_backward_pytorch(Q, K, V, O, L, grad_out, is_causal)
+        return dQ, dK, dV, None
         raise NotImplementedError
 
 
@@ -292,4 +300,24 @@ class FlashAttention2Triton(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_outputs):
+        Q, K, V, O, L = ctx.saved_tensors
+        is_causal = ctx.is_causal
+        dQ, dK, dV = fa2_backward_pytorch(Q, K, V, O, L, grad_outputs, is_causal)
+        return dQ, dK, dV, None
         raise NotImplementedError
+
+@torch.compile
+def fa2_backward_pytorch(Q, K, V, O, L, dO, is_causal):
+    dim = Q.shape[-1]
+    S = einsum(Q, K, "b q d, b k d -> b q k") / math.sqrt(dim)
+    if is_causal:
+        mask = torch.ones(S.shape[-2:], dtype=torch.bool, device=S.device).tril()
+        S = torch.where(mask, S, -1e6)
+    P = torch.exp(S - L.unsqueeze(-1))
+    dV = einsum(P, dO, "b q k, b q d -> b k d")
+    dP = einsum(dO, V, "b q d, b k d -> b q k")
+    D = torch.sum(input=(O * dO), dim=-1, keepdim=True)
+    dS = P * (dP - D)
+    dQ = einsum(dS, K, "b q k, b k d -> b q d") / math.sqrt(dim)
+    dK = einsum(dS, Q, "b q k, b q d -> b k d") / math.sqrt(dim)
+    return dQ, dK, dV
