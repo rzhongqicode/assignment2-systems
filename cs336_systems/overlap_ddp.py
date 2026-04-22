@@ -37,12 +37,7 @@ class Overlap_Wrapper(nn.Module):
         self.handles.append(handle)
 
 
-import torch
-import torch.distributed as dist
-from torch import nn
-
-
-class Overlap_Wrapper(nn.Module):
+class Overlap_Wrapper_Bucketed(nn.Module):
     """
     Naive DDP implementation: Overlaps computation and communication
     by asynchronously all-reducing each parameter's gradient individually.
