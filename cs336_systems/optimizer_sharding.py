@@ -1,4 +1,4 @@
-from typing import Any, type
+from typing import Any, Type
 
 import torch
 import torch.distributed as dist
@@ -13,7 +13,7 @@ class OptimizerSharding(torch.optim.Optimizer):
     maintains and updates a fraction of the states, drastically reducing memory usage.
     """
 
-    def __init__(self, params, optimizer_cls: type[Optimizer], **kwargs: Any):
+    def __init__(self, params, optimizer_cls: Type[Optimizer], **kwargs: Any):
         # 1. Retrieve distributed environment information
         self.rank = dist.get_rank() if dist.is_initialized() else 0
         self.world_size = dist.get_world_size() if dist.is_initialized() else 1

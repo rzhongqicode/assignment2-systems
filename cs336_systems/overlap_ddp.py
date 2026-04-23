@@ -6,7 +6,7 @@ from torch import nn
 class Overlap_Wrapper(nn.Module):
     def __init__(self, model: nn.Module):
         super().__init__()
-        self.model = model
+        self.module = model
         # Broadcast initial parameters from rank 0 to ensure all start identically
         for param in model.parameters():
             dist.broadcast(tensor=param.data, src=0, async_op=False)
@@ -15,12 +15,12 @@ class Overlap_Wrapper(nn.Module):
 
         self.handles = []
         # set hook on model parameters
-        for param in self.model.parameters():
+        for param in self.module.parameters():
             if param.requires_grad:
                 param.register_post_accumulate_grad_hook(hook=self.hook)
 
     def forward(self, *inputs, **kwargs):
-        return self.model(*inputs, **kwargs)
+        return self.module(*inputs, **kwargs)
 
     def finish_gradient_synchronization(self):
         for handle in self.handles:
@@ -28,7 +28,7 @@ class Overlap_Wrapper(nn.Module):
         self.handles.clear()
 
         # avarage grad
-        for param in self.model.parameters():
+        for param in self.module.parameters():
             if param.requires_grad and param.grad is not None:
                 param.grad.data /= self.world_size
 
@@ -37,56 +37,56 @@ class Overlap_Wrapper(nn.Module):
         self.handles.append(handle)
 
 
-class Overlap_Wrapper_Bucketed(nn.Module):
-    """
-    Naive DDP implementation: Overlaps computation and communication
-    by asynchronously all-reducing each parameter's gradient individually.
-    """
+# class Overlap_Wrapper_Bucketed(nn.Module):
+#     """
+#     Naive DDP implementation: Overlaps computation and communication
+#     by asynchronously all-reducing each parameter's gradient individually.
+#     """
 
-    def __init__(self, model: nn.Module):
-        super().__init__()
-        self.model = model
+#     def __init__(self, model: nn.Module):
+#         super().__init__()
+#         self.model = model
 
-        # Broadcast initial parameters from rank 0 to ensure identical initialization across all ranks
-        for param in model.parameters():
-            dist.broadcast(tensor=param.data, src=0, async_op=False)
+#         # Broadcast initial parameters from rank 0 to ensure identical initialization across all ranks
+#         for param in model.parameters():
+#             dist.broadcast(tensor=param.data, src=0, async_op=False)
 
-        # Get the total number of processes (world size) for gradient averaging
-        self.world_size = dist.get_world_size() if dist.is_initialized() else 1
+#         # Get the total number of processes (world size) for gradient averaging
+#         self.world_size = dist.get_world_size() if dist.is_initialized() else 1
 
-        self.handles = []
+#         self.handles = []
 
-        # Register a post-accumulate-grad hook for every parameter that requires a gradient
-        for param in self.model.parameters():
-            if param.requires_grad:
-                param.register_post_accumulate_grad_hook(hook=self.hook)
+#         # Register a post-accumulate-grad hook for every parameter that requires a gradient
+#         for param in self.model.parameters():
+#             if param.requires_grad:
+#                 param.register_post_accumulate_grad_hook(hook=self.hook)
 
-    def forward(self, *inputs, **kwargs):
-        # Pass-through all arguments to the underlying model
-        return self.model(*inputs, **kwargs)
+#     def forward(self, *inputs, **kwargs):
+#         # Pass-through all arguments to the underlying model
+#         return self.model(*inputs, **kwargs)
 
-    def finish_gradient_synchronization(self):
-        """
-        Wait for all asynchronous communication to finish, then average the gradients.
-        Must be called before optimizer.step().
-        """
-        # Block until all async all-reduce operations are completed
-        for handle in self.handles:
-            handle.wait()
-        self.handles.clear()
+#     def finish_gradient_synchronization(self):
+#         """
+#         Wait for all asynchronous communication to finish, then average the gradients.
+#         Must be called before optimizer.step().
+#         """
+#         # Block until all async all-reduce operations are completed
+#         for handle in self.handles:
+#             handle.wait()
+#         self.handles.clear()
 
-        # Average the gradients across all processes
-        for param in self.model.parameters():
-            if param.requires_grad and param.grad is not None:
-                param.grad.data /= self.world_size
+#         # Average the gradients across all processes
+#         for param in self.model.parameters():
+#             if param.requires_grad and param.grad is not None:
+#                 param.grad.data /= self.world_size
 
-    def hook(self, tensor):
-        """
-        Triggered immediately when a parameter's gradient finishes computation.
-        Dispatches an async all-reduce operation.
-        """
-        handle = dist.all_reduce(tensor.grad.data, async_op=True)
-        self.handles.append(handle)
+#     def hook(self, tensor):
+#         """
+#         Triggered immediately when a parameter's gradient finishes computation.
+#         Dispatches an async all-reduce operation.
+#         """
+#         handle = dist.all_reduce(tensor.grad.data, async_op=True)
+#         self.handles.append(handle)
 
 
 class Overlap_Wrapper_bucketed(nn.Module):
@@ -97,7 +97,7 @@ class Overlap_Wrapper_bucketed(nn.Module):
 
     def __init__(self, model: nn.Module, bucket_size_mb: float):
         super().__init__()
-        self.model = model
+        self.module = model
         self.bucket_size_mb = bucket_size_mb
 
         # Broadcast initial parameters from rank 0
@@ -123,7 +123,7 @@ class Overlap_Wrapper_bucketed(nn.Module):
 
         # Iterate in reverse order: later layers compute backward first,
         # so they should be bucketed and communicated first to maximize overlap.
-        for param in reversed(list(self.model.parameters())):
+        for param in reversed(list(self.module.parameters())):
             if param.requires_grad:
                 # Add condition `not cur_bucket` to handle the edge case where a single
                 # parameter is larger than the bucket size limit.
@@ -154,13 +154,13 @@ class Overlap_Wrapper_bucketed(nn.Module):
         # ---------------------------------------------------------
         # Hook Registration
         # ---------------------------------------------------------
-        for param in self.model.parameters():
+        for param in self.module.parameters():
             if param.requires_grad:
                 # Pass the parameter to the closure factory to retain its identity
                 param.register_post_accumulate_grad_hook(hook=self._my_hook(param))
 
     def forward(self, *inputs, **kwargs):
-        return self.model(*inputs, **kwargs)
+        return self.module(*inputs, **kwargs)
 
     def finish_gradient_synchronization(self):
         """
